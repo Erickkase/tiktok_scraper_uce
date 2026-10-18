@@ -39,7 +39,7 @@ Requires Python 3.9 or newer. No browser extensions are used.
 - Etapa 1: entrada de un usuario por consola y validacion del nombre.
 - Etapa 2: exportar hasta 10 videos unicos, ordenados del mas reciente al mas antiguo.
 - Etapa 3: integrar comentarios, corazones, compartidos y guardados por video en la descarga.
-- Pendiente: manejar perfiles privados, inexistentes, bloqueos y datos no disponibles.
+- Etapa 4: pausa entre videos, deteccion de restricciones y cierre seguro del navegador.
 
 La seleccion carga hasta reunir al menos 20 candidatos o hasta que tres intentos
 consecutivos no agreguen videos, con un maximo de 30 lecturas. Ordena los videos
@@ -58,7 +58,24 @@ que correspondan al video solicitado. Si faltan, intenta leer los contadores
 visibles, incluido `favorite-count` para guardados. Los contadores visibles con K,
 M o B son aproximados. La navegacion usa el idioma ingles para interpretar esos
 formatos numericos. Una metrica ausente queda vacia, no se convierte en cero;
-`Metrics Error` explica los fallos y la ejecucion continua con el siguiente video.
+`Metrics Error` explica los fallos recuperables y la ejecucion continua con el siguiente video.
+
+Entre el final de una consulta de interacciones y la apertura del siguiente video
+se esperan al menos 2 segundos (`VIDEO_DELAY_SECONDS` en `main.py`), incluso si
+faltaron metricas en el video anterior. Para 10 videos hay 9 pausas: al menos
+18 segundos adicionales. No hay una pausa adicional antes del primero ni despues
+del ultimo. La pausa no garantiza evitar bloqueos y no limita las solicitudes
+internas que el navegador hace al cargar cada pagina.
+
+Ante HTTP 403/429, una verificacion visible conocida o una redireccion al login,
+se detienen las consultas de videos: se guardan los resultados obtenidos y se
+marcan los videos restantes con el motivo. No hay reintentos automaticos ni
+intentos de evitar la restriccion. Los mensajes visibles de perfil privado o
+cuenta inexistente se muestran como errores claros. Si no se cargan enlaces de
+videos, se informa sin afirmar que la cuenta no tenga publicaciones. Estos
+detectores dependen del HTML y los mensajes de TikTok y no cubren todas sus
+variantes. El navegador se cierra tambien ante errores o cancelacion. Si el Excel
+esta abierto o no hay permisos para guardarlo, se muestra un mensaje explicativo.
 
 No es necesario ejecutar `obtener_estadisticas.py`: queda como script independiente
 anterior y no se utiliza en el flujo principal. Solo se recopilan datos publicos

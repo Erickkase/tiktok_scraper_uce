@@ -1,12 +1,51 @@
 import asyncio
 import json
 import re
-from playwright.async_api import async_playwright
+import sys
+from playwright.async_api import async_playwright, Error as PlaywrightError, TimeoutError as PlaywrightTimeoutError
 import os
 import aiohttp
 import aiofiles
 import pandas as pd
 from datetime import datetime
+
+VIDEO_DELAY_SECONDS = 2
+INTERACTION_FIELDS = {
+    'Likes': ('diggCount', 'like-count'),
+    'Comments': ('commentCount', 'comment-count'),
+    'Shares': ('shareCount', 'share-count'),
+    'Saves': ('collectCount', 'favorite-count'),
+}
+
+
+class ScrapingRestrictedError(RuntimeError):
+    pass
+
+
+async def check_page_access(page, response=None):
+    if response and response.status in (403, 429):
+        raise ScrapingRestrictedError(
+            f'TikTok restringio el acceso (HTTP {response.status}). Deten la ejecucion y prueba mas tarde.'
+        )
+    if response and response.status >= 400:
+        raise ValueError(f'Pagina no disponible (HTTP {response.status}).')
+    challenge = page.locator(
+        '#captcha_container, #verify-center, iframe[src*="captcha"], [data-e2e="captcha"]'
+    ).first
+    if await challenge.is_visible():
+        raise ScrapingRestrictedError('TikTok solicita una verificacion. No se haran mas consultas.')
+    if '/login' in page.url:
+        raise ScrapingRestrictedError('TikTok solicita iniciar sesion. No se haran mas consultas.')
+    private = page.get_by_text(
+        re.compile(r'This account is (?:currently )?private|Esta cuenta es privada', re.I)
+    ).first
+    if await private.is_visible():
+        raise ValueError('El perfil es privado; sus publicaciones no son accesibles.')
+    missing = page.get_by_text(
+        re.compile(r"Couldn't find this account|Account not found|No se pudo encontrar esta cuenta", re.I)
+    ).first
+    if await missing.is_visible():
+        raise ValueError('No se encontro la cuenta. Comprueba el nombre de usuario.')
 
 def normalize_username(value):
     username = value.strip().removeprefix('@')
@@ -45,7 +84,12 @@ async def download_image(url, folder, filename):
         return None
 
 async def collect_recent_videos(page, username):
-    await page.wait_for_selector('a[href*="/video/"]', timeout=60000)
+    try:
+        await page.wait_for_selector('a[href*="/video/"]', timeout=60000)
+    except PlaywrightTimeoutError:
+        await check_page_access(page)
+        print('No se cargaron videos publicos. El perfil puede estar vacio o el contenido no disponible.')
+        return []
     videos = {}
     unchanged = 0
     pattern = re.compile(
@@ -53,6 +97,7 @@ async def collect_recent_videos(page, username):
         re.IGNORECASE,
     )
     for _ in range(30):
+        await check_page_access(page)
         candidates = await page.eval_on_selector_all('a[href*="/video/"]', '''links =>
             links.map(link => {
                 const card = link.closest('[data-e2e="user-post-item"]')
@@ -83,22 +128,16 @@ async def collect_recent_videos(page, username):
     return [videos[video_id] for video_id in sorted(videos, reverse=True)[:10]]
 
 async def get_video_interactions(page, url):
-    fields = {
-        'Likes': ('diggCount', 'like-count'),
-        'Comments': ('commentCount', 'comment-count'),
-        'Shares': ('shareCount', 'share-count'),
-        'Saves': ('collectCount', 'favorite-count'),
-    }
-    result = dict.fromkeys(fields)
+    result = dict.fromkeys(INTERACTION_FIELDS)
     result['Metrics Error'] = ''
     try:
         response = await page.goto(url, wait_until='domcontentloaded', timeout=30000)
-        if response and response.status >= 400:
-            raise ValueError(f'HTTP {response.status}')
+        await check_page_access(page, response)
         await page.wait_for_selector(
             '#__UNIVERSAL_DATA_FOR_REHYDRATION__, [data-e2e="like-count"]',
             state='attached', timeout=15000,
         )
+        await check_page_access(page)
         expected_id = url.rstrip('/').rsplit('/', 1)[-1]
         actual_id = re.search(r'/video/([0-9]+)', page.url)
         if not actual_id or actual_id.group(1) != expected_id:
@@ -116,7 +155,7 @@ async def get_video_interactions(page, url):
                 pass
 
         missing = []
-        for name, (key, selector) in fields.items():
+        for name, (key, selector) in INTERACTION_FIELDS.items():
             value = stats.get(key)
             if value is None:
                 counter = page.locator(f'[data-e2e="{selector}"]').first
@@ -130,18 +169,48 @@ async def get_video_interactions(page, url):
                 missing.append(name)
         if missing:
             result['Metrics Error'] = 'Contadores no disponibles: ' + ', '.join(missing)
+    except ScrapingRestrictedError:
+        raise
     except Exception as error:
+        try:
+            await check_page_access(page)
+        except ValueError:
+            pass
         result['Metrics Error'] = f'{type(error).__name__}: {error}'
     return result
 
-async def run(playwright, username):
-    browser = await playwright.chromium.launch(headless=False)
+async def collect_video_interactions(page, videos):
+    results = []
+    for index, video in enumerate(videos):
+        if index:
+            print(f'Esperando {VIDEO_DELAY_SECONDS} segundos antes del siguiente video...')
+            await asyncio.sleep(VIDEO_DELAY_SECONDS)
+        print(f'Obteniendo interacciones del video {index + 1}/{len(videos)}...')
+        try:
+            result = await get_video_interactions(page, video['url'])
+        except ScrapingRestrictedError as error:
+            print(f'Consultas detenidas: {error}')
+            results.extend({
+                **dict.fromkeys(INTERACTION_FIELDS),
+                'Metrics Error': f'Consulta detenida por restriccion: {error}',
+            } for _ in videos[index:])
+            break
+        if result['Metrics Error']:
+            print(f"Aviso: {result['Metrics Error']}")
+        results.append(result)
+    return results
+
+async def scrape_profile(browser, username):
     page = await browser.new_page(locale='en-US')
-    await page.goto(f'https://www.tiktok.com/@{username}')
+    response = await page.goto(
+        f'https://www.tiktok.com/@{username}', wait_until='domcontentloaded', timeout=30000
+    )
+    await check_page_access(page, response)
 
     print(f"Página de {username} cargada correctamente. Obteniendo contenido...")
 
     recent_videos = await collect_recent_videos(page, username)
+    await check_page_access(page)
     if len(recent_videos) < 10:
         print(f'Solo se pudieron obtener {len(recent_videos)} videos; no se completaran con duplicados.')
 
@@ -152,16 +221,17 @@ async def run(playwright, username):
 
     video_data = []
     metrics_page = await browser.new_page(locale='en-US')
+    interactions_data = await collect_video_interactions(metrics_page, recent_videos)
     for image_counter, video in enumerate(recent_videos, start=1):
-        views_number = convert_views(video['views']) if video['views'] else None
+        try:
+            views_number = convert_views(video['views']) if video['views'] else None
+        except ValueError:
+            views_number = None
         image_filename = f"{today}_{image_counter}.jpg"
         image_id = None
         if video['image_url']:
             image_id = await download_image(video['image_url'], folder_name, image_filename)
-        print(f'Obteniendo interacciones del video {image_counter}/{len(recent_videos)}...')
-        interactions = await get_video_interactions(metrics_page, video['url'])
-        if interactions['Metrics Error']:
-            print(f"Aviso: {interactions['Metrics Error']}")
+        interactions = interactions_data[image_counter - 1]
         video_data.append({
             'Video Links': video['url'], 'Views': views_number,
             'image_id': image_id or 'Sin id', 'id_post': f"{today}_{image_counter}",
@@ -188,15 +258,19 @@ async def run(playwright, username):
     bio_element = await page.query_selector('h2[data-e2e="user-bio"]')
     profile_image_element = await page.query_selector('img[class*="ImgAvatar"]')
 
-    followers = convert_views(await followers_element.inner_text()) if followers_element else 'N/A'
-    following = convert_views(await following_element.inner_text()) if following_element else 'N/A'
-    likes = convert_views(await likes_element.inner_text()) if likes_element else 'N/A'
+    counts = []
+    for element in (followers_element, following_element, likes_element):
+        try:
+            counts.append(convert_views(await element.inner_text()) if element else None)
+        except ValueError:
+            counts.append(None)
+    followers, following, likes = counts
     bio = await bio_element.inner_text() if bio_element else 'N/A'
     profile_image_url = await profile_image_element.get_attribute('src') if profile_image_element else None
 
-    profile_image_filename = f"imagen_cover.jpg"
+    profile_image_filename = None
     if profile_image_url:
-        await download_image(profile_image_url, folder_name, profile_image_filename)
+        profile_image_filename = await download_image(profile_image_url, folder_name, 'imagen_cover.jpg')
 
     profile_filename = os.path.join(folder_name, f'{username}_perfil_{today}.xlsx')
     df_profile = pd.DataFrame([{
@@ -210,7 +284,12 @@ async def run(playwright, username):
     df_profile.to_excel(profile_filename, index=False)
     print(f'La información del perfil se ha guardado en el archivo {profile_filename}.')
 
-    await browser.close()
+async def run(playwright, username):
+    browser = await playwright.chromium.launch(headless=False)
+    try:
+        await scrape_profile(browser, username)
+    finally:
+        await browser.close()
 
 async def main(username):
     async with async_playwright() as playwright:
@@ -227,3 +306,12 @@ if __name__ == '__main__':
         asyncio.run(main(username))
     except (KeyboardInterrupt, EOFError):
         print('\nEjecucion cancelada.')
+    except PlaywrightTimeoutError:
+        print('TikTok no respondio a tiempo. Comprueba tu conexion e intenta mas tarde.')
+        sys.exit(1)
+    except PermissionError:
+        print('No se pudo guardar el archivo. Cierra los Excel abiertos y revisa los permisos de la carpeta.')
+        sys.exit(1)
+    except (ValueError, RuntimeError, PlaywrightError, OSError) as error:
+        print(f'No se pudo completar la descarga: {error}')
+        sys.exit(1)

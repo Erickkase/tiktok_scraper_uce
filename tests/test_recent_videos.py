@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from main import collect_recent_videos
 
@@ -13,6 +13,11 @@ def video(video_id, username='demo', suffix=''):
 
 
 class RecentVideosTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        access_check = patch('main.check_page_access', new_callable=AsyncMock)
+        access_check.start()
+        self.addCleanup(access_check.stop)
+
     async def test_returns_ten_newest_not_old_pinned_posts(self):
         page = AsyncMock()
         page.eval_on_selector_all.return_value = [video(1), video(2)] + [

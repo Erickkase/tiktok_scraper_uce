@@ -2,7 +2,7 @@ import json
 import unittest
 from unittest.mock import AsyncMock, MagicMock
 
-from main import convert_views, get_video_interactions
+from main import ScrapingRestrictedError, convert_views, get_video_interactions
 
 
 URL = 'https://www.tiktok.com/@demo/video/123'
@@ -13,6 +13,9 @@ def make_page(stats=None, item_id='123', dom=None):
     page.url = URL
     page.goto.return_value = MagicMock(status=200)
     page.query_selector.return_value = None
+    notice = AsyncMock()
+    notice.is_visible.return_value = False
+    page.get_by_text = MagicMock(return_value=MagicMock(first=notice))
     if stats is not None:
         element = AsyncMock()
         element.text_content.return_value = json.dumps({
@@ -24,6 +27,7 @@ def make_page(stats=None, item_id='123', dom=None):
 
     def locator(selector):
         counter = AsyncMock()
+        counter.is_visible.return_value = False
         if dom and selector in dom:
             counter.inner_text.return_value = dom[selector]
         else:
@@ -55,7 +59,7 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
             'Likes': 12345, 'Comments': 0, 'Shares': 12, 'Saves': 34,
             'Metrics Error': '',
         })
-        page.locator.assert_not_called()
+        self.assertTrue(all('-count' not in call.args[0] for call in page.locator.call_args_list))
 
     async def test_dom_fallback_uses_favorite_count(self):
         page = make_page(dom={
@@ -90,15 +94,14 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
     async def test_rejects_http_error(self):
         page = make_page()
         page.goto.return_value.status = 403
-        result = await get_video_interactions(page, URL)
-        self.assertIn('HTTP 403', result['Metrics Error'])
+        with self.assertRaisesRegex(ScrapingRestrictedError, 'HTTP 403'):
+            await get_video_interactions(page, URL)
 
     async def test_rejects_redirect(self):
         page = make_page({'diggCount': 999})
         page.url = 'https://www.tiktok.com/login'
-        result = await get_video_interactions(page, URL)
-        self.assertIsNone(result['Likes'])
-        self.assertIn('redirigio', result['Metrics Error'])
+        with self.assertRaisesRegex(ScrapingRestrictedError, 'iniciar sesion'):
+            await get_video_interactions(page, URL)
 
     async def test_malformed_json_falls_back_to_dom(self):
         page = make_page({'diggCount': 999}, dom={'[data-e2e="like-count"]': '15'})
