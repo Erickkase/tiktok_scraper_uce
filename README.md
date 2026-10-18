@@ -14,6 +14,7 @@ This script scrapes TikTok profiles to extract video links, views, and profile i
 #### Key Features:
 - Scrapes up to 10 recent video links and views from a TikTok profile.
 - Downloads video thumbnails.
+- Collects likes, comment counts, shares and saves for each selected video.
 - Extracts and saves profile information (followers, following, likes, bio, profile image).
 - Stores all collected data in Excel files.
 
@@ -37,7 +38,7 @@ Requires Python 3.9 or newer. No browser extensions are used.
 
 - Etapa 1: entrada de un usuario por consola y validacion del nombre.
 - Etapa 2: exportar hasta 10 videos unicos, ordenados del mas reciente al mas antiguo.
-- Pendiente: integrar comentarios, corazones, compartidos y guardados por video en la descarga.
+- Etapa 3: integrar comentarios, corazones, compartidos y guardados por video en la descarga.
 - Pendiente: manejar perfiles privados, inexistentes, bloqueos y datos no disponibles.
 
 La seleccion carga hasta reunir al menos 20 candidatos o hasta que tres intentos
@@ -49,8 +50,19 @@ Si TikTok carga menos de 10 videos, exporta los disponibles y muestra un aviso;
 esto no demuestra que el perfil tenga menos de 10 publicaciones. Los videos sin
 vistas o miniatura siguen incluidos, con esos datos vacios o marcados como ausentes.
 
-Todavia no integra automaticamente `obtener_estadisticas.py`. Solo puede intentar
-recopilar datos publicos que TikTok permita cargar; no evita CAPTCHA ni restricciones.
+`main.py` visita cada video y agrega las columnas `Likes` (corazones), `Comments`
+(cantidad de comentarios), `Shares` (compartidos), `Saves` (guardados) y `Metrics Error`
+al Excel de publicaciones. No descarga el texto de los comentarios ni los videos.
+Primero lee los contadores de los datos estructurados de la pagina, comprobando
+que correspondan al video solicitado. Si faltan, intenta leer los contadores
+visibles, incluido `favorite-count` para guardados. Los contadores visibles con K,
+M o B son aproximados. La navegacion usa el idioma ingles para interpretar esos
+formatos numericos. Una metrica ausente queda vacia, no se convierte en cero;
+`Metrics Error` explica los fallos y la ejecucion continua con el siguiente video.
+
+No es necesario ejecutar `obtener_estadisticas.py`: queda como script independiente
+anterior y no se utiliza en el flujo principal. Solo se recopilan datos publicos
+que TikTok permita cargar; no se evitan CAPTCHA ni restricciones.
 
 #### Pruebas locales
 
