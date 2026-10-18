@@ -18,11 +18,31 @@ This script scrapes TikTok profiles to extract video links, views, and profile i
 - Stores all collected data in Excel files.
 
 #### Usage:
-1. Ensure you have Python and the necessary libraries installed (Playwright, asyncio, pandas, aiohttp, aiofiles).
-2. Update the `usernames` list with the TikTok usernames you want to scrape.
-3. Run the script:
+Requires Python 3.9 or newer. No browser extensions are used.
+
+1. Install dependencies and the browser:
+   ```bash
+   python -m pip install -r requirements.txt
+   python -m playwright install chromium
+   ```
+2. Run the script:
    ```bash
    python main.py
+   ```
+3. Enter a TikTok username when prompted, for example `@tiktok` or `tiktok`.
+   Do not enter a profile URL. Results are saved in a folder named after the user,
+   relative to the directory from which you run the script.
+
+### Desarrollo Por Etapas
+
+- Etapa 1: entrada de un usuario por consola y validacion del nombre.
+- Pendiente: seleccionar los ultimos 10 videos, considerando las publicaciones fijadas.
+- Pendiente: integrar comentarios, corazones, compartidos y guardados por video en la descarga.
+- Pendiente: manejar perfiles privados, inexistentes, bloqueos y datos no disponibles.
+
+La extraccion actual conserva su comportamiento anterior: no limita la descarga a
+10 videos ni integra automaticamente `obtener_estadisticas.py`. Solo puede intentar
+recopilar datos publicos que TikTok permita cargar; no evita CAPTCHA ni restricciones.
 
 ### obtener_estadisticas.py
 
@@ -39,4 +59,5 @@ This script reads a list of TikTok video links from an Excel file, extracts deta
 2. Update the `archivo_entrada` variable with the path to your input Excel file.
 3. Run the script:
    ```bash
-   python obtener_estadisticas.py
+    python obtener_estadisticas.py
+   ```

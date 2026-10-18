@@ -1,4 +1,5 @@
 import asyncio
+import re
 from playwright.async_api import async_playwright
 import os
 import aiohttp
@@ -6,9 +7,14 @@ import aiofiles
 import pandas as pd
 from datetime import datetime
 
-# Lista de nombres de usuario de TikTok
-#usernames = ["interbancogt","banruralgt","bancoindustrial","gytcontinental","bam.guatemala","bantrabgt","bacgt","bancopromericagt"]
-usernames = ["bacgt","bancopromericagt"]
+def normalize_username(value):
+    username = value.strip().removeprefix('@')
+    if not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.]{0,23}', username) or username.endswith('.'):
+        raise ValueError(
+            'Ingresa un usuario de 1 a 24 caracteres: letras, numeros, puntos o guiones bajos; '
+            'sin enlaces ni punto al inicio o al final.'
+        )
+    return username
 
 def convert_views(views_str):
     if 'K' in views_str:
@@ -119,9 +125,18 @@ async def run(playwright, username):
 
     await browser.close()
 
-async def main():
+async def main(username):
     async with async_playwright() as playwright:
-        tasks = [run(playwright, username) for username in usernames]
-        await asyncio.gather(*tasks)
+        await run(playwright, username)
 
-asyncio.run(main())
+if __name__ == '__main__':
+    try:
+        while True:
+            try:
+                username = normalize_username(input('Usuario de TikTok (con o sin @): '))
+                break
+            except ValueError as error:
+                print(error)
+        asyncio.run(main(username))
+    except (KeyboardInterrupt, EOFError):
+        print('\nEjecucion cancelada.')
