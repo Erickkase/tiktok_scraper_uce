@@ -12,7 +12,7 @@ This repository contains two Python scripts designed to scrape TikTok data and a
 This script scrapes TikTok profiles to extract video links, views, and profile information. It saves the data in organized Excel files for further analysis.
 
 #### Key Features:
-- Scrapes video links and views from TikTok profiles.
+- Scrapes up to 10 recent video links and views from a TikTok profile.
 - Downloads video thumbnails.
 - Extracts and saves profile information (followers, following, likes, bio, profile image).
 - Stores all collected data in Excel files.
@@ -22,7 +22,7 @@ Requires Python 3.9 or newer. No browser extensions are used.
 
 1. Install dependencies and the browser:
    ```bash
-   python -m pip install -r requirements.txt
+   python -m pip install --only-binary=:all: -r requirements.txt
    python -m playwright install chromium
    ```
 2. Run the script:
@@ -36,13 +36,29 @@ Requires Python 3.9 or newer. No browser extensions are used.
 ### Desarrollo Por Etapas
 
 - Etapa 1: entrada de un usuario por consola y validacion del nombre.
-- Pendiente: seleccionar los ultimos 10 videos, considerando las publicaciones fijadas.
+- Etapa 2: exportar hasta 10 videos unicos, ordenados del mas reciente al mas antiguo.
 - Pendiente: integrar comentarios, corazones, compartidos y guardados por video en la descarga.
 - Pendiente: manejar perfiles privados, inexistentes, bloqueos y datos no disponibles.
 
-La extraccion actual conserva su comportamiento anterior: no limita la descarga a
-10 videos ni integra automaticamente `obtener_estadisticas.py`. Solo puede intentar
+La seleccion carga hasta reunir al menos 20 candidatos o hasta que tres intentos
+consecutivos no agreguen videos, con un maximo de 30 lecturas. Ordena los videos
+por su identificador temporal de TikTok para que los fijados antiguos no desplacen
+a los recientes. Supone que el perfil carga en el orden habitual de publicaciones
+recientes, no por popularidad. Solo considera enlaces del usuario solicitado.
+Si TikTok carga menos de 10 videos, exporta los disponibles y muestra un aviso;
+esto no demuestra que el perfil tenga menos de 10 publicaciones. Los videos sin
+vistas o miniatura siguen incluidos, con esos datos vacios o marcados como ausentes.
+
+Todavia no integra automaticamente `obtener_estadisticas.py`. Solo puede intentar
 recopilar datos publicos que TikTok permita cargar; no evita CAPTCHA ni restricciones.
+
+#### Pruebas locales
+
+```bash
+python -B -m unittest discover -s tests -v
+```
+
+Estas pruebas usan datos simulados y no consultan TikTok.
 
 ### obtener_estadisticas.py
 

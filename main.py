@@ -43,6 +43,44 @@ async def download_image(url, folder, filename):
         print(f"Exception occurred while downloading image: {e}")
         return None
 
+async def collect_recent_videos(page, username):
+    await page.wait_for_selector('a[href*="/video/"]', timeout=60000)
+    videos = {}
+    unchanged = 0
+    pattern = re.compile(
+        rf'https://www\.tiktok\.com/@{re.escape(username)}/video/([0-9]+)(?:[/?#].*)?',
+        re.IGNORECASE,
+    )
+    for _ in range(30):
+        candidates = await page.eval_on_selector_all('a[href*="/video/"]', '''links =>
+            links.map(link => {
+                const card = link.closest('[data-e2e="user-post-item"]')
+                    || link.closest('div[class*="DivContainer"]') || link;
+                const views = card.querySelector('[data-e2e="video-views"]');
+                const image = card.querySelector('img');
+                return {
+                    url: link.href,
+                    views: views ? views.textContent.trim() : null,
+                    image_url: image ? image.currentSrc || image.src : null
+                };
+            })''')
+        previous_count = len(videos)
+        for video in candidates:
+            match = pattern.fullmatch(video['url'])
+            if match:
+                video_id = int(match.group(1))
+                video['url'] = f'https://www.tiktok.com/@{username}/video/{video_id}'
+                videos[video_id] = video
+        unchanged = unchanged + 1 if len(videos) == previous_count else 0
+        # Load extra candidates so older pinned posts do not displace recent videos.
+        if len(videos) >= 20 or unchanged >= 3:
+            break
+        await page.mouse.wheel(0, 2000)
+        await page.wait_for_timeout(2000)
+
+    # TikTok video IDs encode creation time; grid position can reflect pinning.
+    return [videos[video_id] for video_id in sorted(videos, reverse=True)[:10]]
+
 async def run(playwright, username):
     browser = await playwright.chromium.launch(headless=False)
     page = await browser.new_page()
@@ -50,13 +88,9 @@ async def run(playwright, username):
 
     print(f"Página de {username} cargada correctamente. Obteniendo contenido...")
 
-    for _ in range(30):
-        await page.mouse.wheel(0, 2000)
-        await page.wait_for_timeout(3000)
-
-    await page.wait_for_selector('a[href*="/video/"]', timeout=60000)
-
-    all_links_elements = await page.query_selector_all('a[href*="/video/"]')
+    recent_videos = await collect_recent_videos(page, username)
+    if len(recent_videos) < 10:
+        print(f'Solo se pudieron obtener {len(recent_videos)} videos; no se completaran con duplicados.')
 
     today = datetime.today().strftime('%Y-%m-%d')
     folder_name = username
@@ -64,26 +98,15 @@ async def run(playwright, username):
         os.makedirs(folder_name)
 
     video_data = []
-    image_counter = 1
-    for link in all_links_elements:
-        href = await link.get_attribute('href')
-        if href and href.startswith('https://www.tiktok.com/'):
-            parent = await link.query_selector('xpath=ancestor::div[contains(@class, "DivContainer")]')
-            if parent:
-                views_element = await parent.query_selector('strong[data-e2e="video-views"]')
-                picture_element = await parent.query_selector('picture img')
-                if views_element and picture_element:
-                    views_text = await views_element.inner_text()
-                    views_number = convert_views(views_text)
-                    image_url = await picture_element.get_attribute('src')
-                    image_filename = f"{today}_{image_counter}.jpg"
-                    image_id = await download_image(image_url, folder_name, image_filename)
-                    if not image_id:
-                        image_id = "Sin id"
-                    video_data.append((href, views_number, image_id, f"{today}_{image_counter}"))
-                    image_counter += 1
-
-    video_data = list(set(video_data))
+    for image_counter, video in enumerate(recent_videos, start=1):
+        views_number = convert_views(video['views']) if video['views'] else None
+        image_filename = f"{today}_{image_counter}.jpg"
+        image_id = None
+        if video['image_url']:
+            image_id = await download_image(video['image_url'], folder_name, image_filename)
+        video_data.append((
+            video['url'], views_number, image_id or 'Sin id', f"{today}_{image_counter}"
+        ))
 
     print(f"Se encontraron {len(video_data)} videos únicos para {username}:")
     for link, views, image_id, id_post in video_data:
