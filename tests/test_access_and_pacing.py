@@ -69,6 +69,11 @@ class AccessTests(unittest.IsolatedAsyncioTestCase):
 
 
 class PacingTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        comments = patch('main.get_video_comments', new_callable=AsyncMock)
+        comments.start().return_value = {'rows': [], 'error': '', 'restricted': False}
+        self.addCleanup(comments.stop)
+
     async def test_wait_occurs_between_videos_not_before_first_or_after_last(self):
         events = []
 

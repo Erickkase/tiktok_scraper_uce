@@ -9,11 +9,12 @@ sin extensiones del navegador.
 - Obtiene la cantidad de seguidores y cuentas seguidas.
 - Recopila enlaces y visualizaciones de hasta 10 videos.
 - Obtiene las cantidades de corazones, comentarios, compartidos y guardados de cada video.
-- Guarda los datos en dos archivos Excel: uno del perfil y otro de los videos.
+- Intenta obtener 20 comentarios principales con texto por video, sin duplicar sus IDs.
+- Guarda tres archivos Excel: perfil, videos y comentarios.
 - Descarga las miniaturas y la imagen del perfil cuando estan disponibles.
 - Espera al menos 2 segundos entre las consultas de videos.
 
-No descarga los videos completos ni el texto de los comentarios. No accede a
+No descarga los videos completos ni las respuestas a los comentarios. No accede a
 cuentas privadas ni evita CAPTCHA o restricciones de TikTok. La disponibilidad
 de los datos depende de lo que TikTok permita cargar; la pausa no garantiza evitar bloqueos.
 
@@ -54,9 +55,16 @@ que ejecutaste el programa. Contiene:
 
 - `<usuario>_perfil_<fecha>.xlsx`: seguidores, seguidos y datos del perfil.
 - `<usuario>_post_<fecha>.xlsx`: enlaces, vistas e interacciones de los videos.
+- `<usuario>_comentarios_<fecha>.xlsx`: enlace del video, ID del comentario, autor, texto y corazones del comentario.
 - Las imagenes que se hayan podido descargar.
 
 Los datos no disponibles quedan vacios. La columna `Metrics Error` indica los
 problemas al obtener interacciones. Si se cargan menos de 10 videos, se guardan
-los disponibles. Ejecutar el mismo usuario el mismo dia puede sobrescribir los
+los disponibles. `Comments` sigue siendo el contador total del video;
+`Comments Collected` indica cuantos textos se obtuvieron y `Comments Error`
+explica si no se llego a 20 o hubo un problema. Se guarda lo disponible si hay
+menos de 20 comentarios publicos o TikTok no permite cargarlos. Se sigue el orden
+que muestra TikTok, no necesariamente el cronologico. La espera entre videos se
+mantiene y se esperan 2 segundos entre intentos de cargar mas comentarios.
+Ejecutar el mismo usuario el mismo dia puede sobrescribir los
 archivos; cierra los Excel antes de volver a ejecutar el programa.
