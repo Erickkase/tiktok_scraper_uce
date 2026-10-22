@@ -14,7 +14,7 @@ sin extensiones del navegador.
 - Descarga las miniaturas y la imagen del perfil cuando estan disponibles.
 - Espera al menos 2 segundos entre las consultas de videos.
 
-No descarga los videos completos ni las respuestas a los comentarios. No accede a
+El comando principal no descarga los videos completos ni las respuestas a los comentarios. No accede a
 cuentas privadas ni evita CAPTCHA o restricciones de TikTok. La disponibilidad
 de los datos depende de lo que TikTok permita cargar; la pausa no garantiza evitar bloqueos.
 
@@ -46,7 +46,7 @@ Usuario de TikTok (con o sin @): @tiktok
 
 No ingreses la URL completa. Se abrira una ventana de Chromium; espera a que
 termine y revisa los mensajes de la terminal. Puedes cancelar con `Ctrl+C`.
-No necesitas ejecutar ningun otro script.
+No necesitas ejecutar ningun otro script para obtener los Excel y comentarios.
 
 ## Resultados
 
@@ -68,3 +68,38 @@ que muestra TikTok, no necesariamente el cronologico. La espera entre videos se
 mantiene y se esperan 2 segundos entre intentos de cargar mas comentarios.
 Ejecutar el mismo usuario el mismo dia puede sobrescribir los
 archivos; cierra los Excel antes de volver a ejecutar el programa.
+
+## Descargar los videos (opcional)
+
+Esta es la primera etapa de preparacion para analizar el lenguaje hablado de los
+videos. Todavia no transcribe audio ni calcula Big Five, emociones o personalidad.
+
+Usa Python 3.12 para este paso. La descarga es independiente del scraper y no
+cambia su instalacion de Python. Instala las dependencias opcionales:
+
+```powershell
+py -3.12 -m pip install --only-binary=:all: -r requirements_videos.txt
+py -3.12 -m playwright install chromium
+```
+
+Despues de ejecutar `main.py`, indica la ruta real del Excel de publicaciones:
+
+```powershell
+py -3.12 descargar_videos.py "usuario\usuario_post_2026-10-21.xlsx"
+```
+
+Cambia `usuario` y la fecha por los de tu archivo. Se intenta descargar hasta 10
+videos unicos en la subcarpeta `videos`, junto al Excel. El limite es 200 MiB por
+archivo y se esperan al menos 2 segundos entre consultas. Los MP4 existentes que
+pasan las comprobaciones basicas se reutilizan. No se sobrescriben archivos
+existentes invalidos ni se intenta evitar restricciones.
+
+Se genera `<nombre_del_excel>_descargas.xlsx` con el avance, archivo y motivo de
+cada resultado. Los estados son `downloaded` (descargado), `existing` (ya existia),
+`error` (fallo), `not_queried` (no consultado), `invalid` (enlace invalido),
+`duplicate` (repetido), `limit` (fuera del limite) y `cancelled` (cancelado).
+Si aparece una restriccion 403/429, CAPTCHA o solicitud de inicio de sesion, se
+detienen las consultas restantes. No todos los videos publicos permiten descarga.
+Se espera un MP4 del reproductor publico, sin unir pistas ni convertir con FFmpeg.
+Las comprobaciones de archivo son basicas; la transcripcion debera comprobar si
+contiene voz util antes de realizar cualquier analisis.
