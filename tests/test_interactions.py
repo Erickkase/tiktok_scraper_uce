@@ -2,7 +2,7 @@ import json
 import unittest
 from unittest.mock import AsyncMock, MagicMock
 
-from main import ScrapingRestrictedError, convert_views, get_video_interactions
+from scraper import ScrapingRestrictedError, convert_views, get_video_interactions
 
 
 URL = 'https://www.tiktok.com/@demo/video/123'
@@ -90,6 +90,7 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         result = await get_video_interactions(page, URL)
         self.assertIsNone(result['Likes'])
         self.assertIn('TimeoutError', result['Metrics Error'])
+        self.assertTrue(result['_navigation_failed'])
 
     async def test_rejects_http_error(self):
         page = make_page()
@@ -108,6 +109,23 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         page.query_selector.return_value.text_content.return_value = '{invalid'
         result = await get_video_interactions(page, URL)
         self.assertEqual(result['Likes'], 15)
+
+    async def test_waits_for_complete_hydration_before_reading_json(self):
+        page = make_page({'diggCount': 9})
+
+        async def hydrate(*args, **kwargs):
+            self.assertEqual(kwargs['arg'], '123')
+            page.query_selector.return_value.text_content.return_value = json.dumps({
+                '__DEFAULT_SCOPE__': {'webapp.video-detail': {'itemInfo': {'itemStruct': {
+                    'id': '123', 'statsV2': {'diggCount': 9, 'commentCount': 0,
+                                           'shareCount': 2, 'collectCount': 3},
+                }}}}
+            })
+
+        page.wait_for_function.side_effect = hydrate
+        result = await get_video_interactions(page, URL)
+        self.assertEqual(result, {'Likes': 9, 'Comments': 0, 'Shares': 2, 'Saves': 3, 'Metrics Error': ''})
+        page.goto.assert_awaited_once()
 
 
 if __name__ == '__main__':

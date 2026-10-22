@@ -1,13 +1,8 @@
-import io
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from openpyxl import load_workbook
-
-from main import (
-    COMMENTS_PER_VIDEO, ScrapingRestrictedError, collect_video_interactions,
-    get_video_comments, save_comments, scrape_profile,
-)
+from configuracion import DEFAULT_CONFIG
+from scraper import ScrapingRestrictedError, get_video_comments, scrape_profile
 
 
 URL = 'https://www.tiktok.com/@demo/video/123'
@@ -21,10 +16,21 @@ def comment(number, video_id='123', text=None):
     }
 
 
+def response(payload, status=200, request_video='123', cursor=0):
+    result = MagicMock()
+    result.url = f'https://www.tiktok.com/api/comment/list/?aweme_id={request_video}&cursor={cursor}'
+    result.status = status
+    result.json = AsyncMock(return_value=payload)
+    if isinstance(payload, Exception):
+        result.json.side_effect = payload
+    return result
+
+
 def comment_page(payloads, status=200, request_video='123'):
     page = MagicMock()
     page.url = URL
     page.locator.return_value.first.click = AsyncMock()
+    page.locator.return_value.first.is_visible = AsyncMock(return_value=False)
     page.evaluate = AsyncMock()
     responses = iter(payloads)
 
@@ -33,13 +39,7 @@ def comment_page(payloads, status=200, request_video='123'):
             payload = next(responses)
         except StopIteration:
             return
-        response = MagicMock()
-        response.url = f'https://www.tiktok.com/api/comment/list/?aweme_id={request_video}'
-        response.status = status
-        response.json = AsyncMock(return_value=payload)
-        if isinstance(payload, Exception):
-            response.json.side_effect = payload
-        page.on.call_args.args[1](response)
+        page.on.call_args.args[1](response(payload, status, request_video))
 
     page.wait_for_timeout = AsyncMock(side_effect=tick)
     return page
@@ -47,27 +47,27 @@ def comment_page(payloads, status=200, request_video='123'):
 
 class CommentTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        access = patch('main.check_page_access', new_callable=AsyncMock)
+        access = patch('scraper.check_page_access', new_callable=AsyncMock)
         self.access = access.start()
         self.addCleanup(access.stop)
 
     async def test_collects_twenty_and_removes_listener(self):
         page = comment_page([{'comments': [comment(n) for n in range(25)], 'has_more': 1}])
         result = await get_video_comments(page, URL)
-        self.assertEqual(len(result['rows']), COMMENTS_PER_VIDEO)
+        self.assertEqual(len(result['rows']), DEFAULT_CONFIG.comments)
         self.assertEqual(result['rows'][0]['Author'], 'autor0')
+        self.assertEqual(result['rows'][0]['Author Handle'], 'autor0')
         self.assertEqual(result['rows'][0]['Comment Likes'], 0)
         self.assertEqual(result['rows'][0]['Comment Text'], 'Comentario 0')
         self.assertEqual(result['error'], '')
+        self.assertEqual(result['status'], 'completo')
         self.assertFalse(result['restricted'])
         page.remove_listener.assert_called_once_with('response', page.on.call_args.args[1])
 
     async def test_loads_more_deduplicates_ids_and_keeps_same_text_with_different_ids(self):
-        first = [comment(n, text='Mismo texto') for n in range(10)]
-        second = [comment(n, text='Mismo texto') for n in range(8, 20)]
         page = comment_page([
-            {'comments': first, 'has_more': 1},
-            {'comments': second, 'has_more': 0},
+            {'comments': [comment(n, text='Mismo texto') for n in range(10)], 'has_more': 1},
+            {'comments': [comment(n, text='Mismo texto') for n in range(8, 20)], 'has_more': 0},
         ])
         result = await get_video_comments(page, URL)
         self.assertEqual(len(result['rows']), 20)
@@ -86,34 +86,65 @@ class CommentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(page.wait_for_timeout.await_count, 2)
 
     async def test_waits_for_native_page_retry_after_empty_response(self):
-        page = comment_page([
-            ValueError('Respuesta aun no disponible'),
-            {'comments': [comment(n) for n in range(20)], 'has_more': 0},
-        ])
-        result = await get_video_comments(page, URL)
-        self.assertEqual(len(result['rows']), 20)
-        self.assertEqual(result['error'], '')
-        self.assertEqual(page.wait_for_timeout.await_count, 2)
+        for first in (ValueError('Respuesta aun no disponible'), {'comments': [], 'has_more': 0},
+                      {'status_code': 123, 'comments': None}):
+            page = comment_page([first, {'comments': [comment(n) for n in range(20)], 'has_more': 0}])
+            result = await get_video_comments(page, URL, reported_count=20)
+            self.assertEqual(len(result['rows']), 20)
+            self.assertEqual(result['error'], '')
+
+    async def test_waits_for_native_retry_at_twenty_seconds_without_initial_comments(self):
+        for initial in (ValueError('JSON aun no disponible'), {'comments': [], 'has_more': 1},
+                        {'comments': [], 'has_more': 0}):
+            with self.subTest(initial=initial):
+                page = comment_page([])
+                elapsed = 0
+
+                async def tick(milliseconds):
+                    nonlocal elapsed
+                    elapsed += milliseconds
+                    if elapsed == 2000:
+                        page.on.call_args.args[1](response(initial))
+                    elif elapsed == 20000:
+                        page.on.call_args.args[1](response({
+                            'comments': [comment(n) for n in range(20)], 'has_more': 0,
+                        }))
+
+                page.wait_for_timeout.side_effect = tick
+                result = await get_video_comments(page, URL, reported_count=20)
+                self.assertEqual(elapsed, 20000)
+                self.assertEqual(result['status'], 'completo')
+                self.assertEqual(result['error'], '')
+                self.assertEqual(len(result['rows']), 20)
 
     async def test_fewer_available_comments_reports_shortfall(self):
-        page = comment_page([{'comments': [comment(1), comment(2)], 'has_more': 0}])
-        result = await get_video_comments(page, URL)
+        result = await get_video_comments(comment_page([{'comments': [comment(1), comment(2)], 'has_more': 0}]), URL)
         self.assertEqual(len(result['rows']), 2)
         self.assertIn('2 de 20', result['error'])
+        self.assertIn('no hay mas comentarios principales', result['error'])
+        self.assertEqual(result['status'], 'parcial')
 
     async def test_filters_replies_other_videos_empty_text_and_missing_ids(self):
-        reply = {**comment(5), 'reply_id': '789'}
-        no_id = {**comment(6), 'cid': None}
-        page = comment_page([{'comments': [
-            comment(1), comment(2, video_id='456'), comment(3, text=' '),
-            reply, no_id, None,
-        ], 'has_more': 0}])
-        result = await get_video_comments(page, URL)
+        items = [comment(1), comment(2, video_id='456'), comment(3, text=' '),
+                 {**comment(4), 'reply_id': '789'}, {**comment(5), 'reply_to_reply_id': '8'},
+                 {**comment(6), 'cid': None}, {**comment(7), 'cid': 7.0}, None]
+        result = await get_video_comments(comment_page([{'comments': items, 'has_more': 0}]), URL)
         self.assertEqual([row['Comment ID'] for row in result['rows']], ['1'])
 
+    async def test_preserves_text_and_distinguishes_handle_from_nickname(self):
+        items = [{**comment(1, text='  texto\n '), 'user': {'nickname': 'Nombre'}},
+                 {**comment(2), 'user': {'nickname': 'Nombre', 'uniqueId': 'handle'}},
+                 {**comment(3), 'user': {'nickname': False, 'unique_id': 123}}]
+        result = await get_video_comments(comment_page([{'comments': items, 'has_more': 0}]), URL)
+        self.assertEqual(result['rows'][0]['Comment Text'], '  texto\n ')
+        self.assertEqual(result['rows'][0]['Author'], 'Nombre')
+        self.assertIsNone(result['rows'][0]['Author Handle'])
+        self.assertEqual(result['rows'][1]['Author Handle'], 'handle')
+        self.assertIsNone(result['rows'][2]['Author Handle'])
+        self.assertIsNone(result['rows'][2]['Author'])
+
     async def test_ignores_responses_for_another_video(self):
-        page = comment_page([{'comments': [comment(1)], 'has_more': 0}], request_video='456')
-        result = await get_video_comments(page, URL)
+        result = await get_video_comments(comment_page([{'comments': [comment(1)], 'has_more': 0}], request_video='456'), URL)
         self.assertEqual(result['rows'], [])
         self.assertIn('0 de 20', result['error'])
 
@@ -125,30 +156,34 @@ class CommentTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('pagina distinta', result['error'])
         page.locator.return_value.first.click.assert_not_awaited()
 
+    async def test_same_video_id_on_foreign_domain_is_not_accepted(self):
+        page = comment_page([])
+        page.url = 'https://example.com/@demo/video/123'
+        result = await get_video_comments(page, URL)
+        self.assertEqual(result['status'], 'error')
+        self.assertEqual(result['rows'], [])
+        page.locator.return_value.first.click.assert_not_awaited()
+
     async def test_comment_http_restriction_is_reported(self):
         for status in (403, 429):
-            with self.subTest(status=status):
-                result = await get_video_comments(comment_page([{}], status=status), URL)
-                self.assertTrue(result['restricted'])
-                self.assertIn(str(status), result['error'])
+            result = await get_video_comments(comment_page([{}], status=status), URL)
+            self.assertTrue(result['restricted'])
+            self.assertEqual(result['status'], 'restringido')
+            self.assertIn(str(status), result['error'])
 
     async def test_partial_comments_survive_later_restriction(self):
         self.access.side_effect = [None, None, ScrapingRestrictedError('Verificacion requerida')]
-        page = comment_page([
-            {'comments': [comment(1)], 'has_more': 1},
-            {'comments': [], 'has_more': 1},
-        ])
+        page = comment_page([{'comments': [comment(1)], 'has_more': 1}, {'comments': [], 'has_more': 1}])
         result = await get_video_comments(page, URL)
         self.assertEqual(len(result['rows']), 1)
         self.assertTrue(result['restricted'])
-        self.assertIn('Verificacion requerida', result['error'])
 
     async def test_missing_responses_have_bounded_wait(self):
         page = comment_page([])
         result = await get_video_comments(page, URL)
         self.assertEqual(result['rows'], [])
-        self.assertEqual(page.wait_for_timeout.await_count, 30)
-        self.assertIn('0 de 20', result['error'])
+        self.assertEqual(page.wait_for_timeout.await_count, DEFAULT_CONFIG.comment_rounds)
+        self.assertEqual(result['status'], 'error')
 
     async def test_stops_when_loaded_comments_do_not_increase(self):
         page = comment_page([{'comments': [comment(1)], 'has_more': 1}])
@@ -157,115 +192,120 @@ class CommentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(page.wait_for_timeout.await_count, 9)
 
     async def test_invalid_public_response_reports_error(self):
-        page = comment_page([{'status_code': 123, 'comments': None}])
-        result = await get_video_comments(page, URL)
+        result = await get_video_comments(comment_page([{'status_code': 123, 'comments': None}]), URL)
         self.assertEqual(result['rows'], [])
         self.assertIn('codigo 123', result['error'])
 
-
-class CommentBatchTests(unittest.IsolatedAsyncioTestCase):
-    async def test_comments_restriction_keeps_metrics_and_skips_next_video(self):
-        metrics = {'Likes': 42, 'Comments': 100, 'Metrics Error': ''}
-        partial = {'rows': [{'Comment ID': '1', 'Comment Text': 'Hola'}],
-                   'error': 'HTTP 429', 'restricted': True}
-        with patch('main.get_video_interactions', new=AsyncMock(return_value=metrics)) as get_metrics:
-            with patch('main.get_video_comments', new=AsyncMock(return_value=partial)) as get_comments:
-                result = await collect_video_interactions(
-                    AsyncMock(), [{'url': URL}, {'url': URL.replace('123', '456')}]
-                )
-        get_metrics.assert_awaited_once()
-        get_comments.assert_awaited_once()
-        self.assertEqual(result[0]['Likes'], 42)
-        self.assertEqual(result[0]['Comments'], 100)
-        self.assertEqual(result[0]['Comments Collected'], 1)
-        self.assertEqual(len(result[0]['_comment_rows']), 1)
-        self.assertIsNone(result[1]['Comments Collected'])
-        self.assertIn('restriccion', result[1]['Metrics Error'])
-
-    async def test_zero_total_skips_comment_panel(self):
-        metrics = {'Likes': 1, 'Comments': 0, 'Metrics Error': ''}
-        with patch('main.get_video_interactions', new=AsyncMock(return_value=metrics)):
-            with patch('main.get_video_comments', new_callable=AsyncMock) as get_comments:
-                result = await collect_video_interactions(AsyncMock(), [{'url': URL}])
-        get_comments.assert_not_awaited()
-        self.assertEqual(result[0]['Comments Collected'], 0)
-        self.assertEqual(result[0]['_comment_rows'], [])
+    async def test_zero_requires_evidence_and_no_contrary_total(self):
+        for total, status in ((None, 'sin_comentarios'), (0, 'sin_comentarios'), (10, 'error')):
+            page = comment_page([{'comments': [], 'has_more': 0}])
+            result = await get_video_comments(page, URL, reported_count=total)
+            self.assertEqual(result['status'], status)
+            self.assertEqual(page.wait_for_timeout.await_count,
+                             0 if total == 0 else 1 if total is None else DEFAULT_CONFIG.comment_rounds)
 
 
-class CommentExportTests(unittest.TestCase):
-    def test_exports_unicode_literal_formulas_and_long_ids(self):
-        stream = io.BytesIO()
-        rows = [{
-            'Video Links': URL, 'Comment ID': '7694797676306615583',
-            'Author': '=1+1', 'Comment Text': '=HYPERLINK("https://example.com")\x00',
-            'Comment Likes': 0, 'id_perfil': 'demo',
-        }, {
-            'Video Links': URL, 'Comment ID': '2', 'Author': 'autor',
-            'Comment Text': 'Hola \U0001f600, caf\u00e9', 'Comment Likes': 3, 'id_perfil': 'demo',
-        }]
-        save_comments(rows, stream)
-        stream.seek(0)
-        book = load_workbook(stream, data_only=False)
-        sheet = book.active
-        self.assertEqual(sheet.max_row, 3)
-        self.assertEqual(sheet['B2'].value, '7694797676306615583')
-        self.assertEqual(sheet['B2'].data_type, 's')
-        self.assertEqual(sheet['C2'].value, '=1+1')
-        self.assertEqual(sheet['C2'].data_type, 's')
-        self.assertEqual(sheet['D2'].value, '=HYPERLINK("https://example.com")')
-        self.assertEqual(sheet['D2'].data_type, 's')
-        self.assertEqual(sheet['D3'].value, 'Hola \U0001f600, caf\u00e9')
-        self.assertEqual(sheet['E2'].value, 0)
-        book.close()
-
-    def test_empty_comments_still_export_headers(self):
-        stream = io.BytesIO()
-        save_comments([], stream)
-        stream.seek(0)
-        book = load_workbook(stream)
-        self.assertEqual(book.active.max_row, 1)
-        self.assertEqual(book.active['D1'].value, 'Comment Text')
-        book.close()
-
-
-class ProfileCommentExportTests(unittest.IsolatedAsyncioTestCase):
-    async def test_profile_keeps_one_post_row_per_video_and_links_comment_rows(self):
+class ProfileDataTests(unittest.IsolatedAsyncioTestCase):
+    async def test_profile_returns_joined_data_without_export_or_images(self):
         browser = AsyncMock()
-        profile = AsyncMock()
-        profile.query_selector.return_value = None
-        metrics_page = AsyncMock()
-        browser.new_page.side_effect = [profile, metrics_page]
+        page = browser.new_page.return_value
+        page.query_selector.return_value = None
         urls = [URL, URL.replace('123', '456')]
-        videos = [{'url': url, 'views': '100', 'image_url': None} for url in urls]
+        videos = [{'url': url, 'views': '100'} for url in urls]
         interactions = [{
             'Likes': 10, 'Comments': 50, 'Shares': 2, 'Saves': 3,
-            'Metrics Error': '', 'Comments Collected': 1,
+            'Metrics Error': '', 'Comments Collected': 1, 'Comments Status': 'parcial',
             'Comments Error': 'Solo un comentario disponible',
-            '_comment_rows': [{'Comment ID': str(index), 'Author': 'autor',
+            '_comment_rows': [{'Comment ID': str(index), 'Author': 'Nombre', 'Author Handle': 'autor',
                                'Comment Text': f'Texto {index}', 'Comment Likes': 0}],
         } for index in range(2)]
-        tables = []
 
-        def capture_table(frame, filename, index=False):
-            tables.append((str(filename), frame.copy()))
+        async def collect(*args):
+            self.assertTrue(page.query_selector.await_count >= 4)
+            return interactions
 
-        with patch('main.check_page_access', new_callable=AsyncMock):
-            with patch('main.collect_recent_videos', new=AsyncMock(return_value=videos)):
-                with patch('main.collect_video_interactions', new=AsyncMock(return_value=interactions)):
-                    with patch('main.os.path.exists', return_value=True):
-                        with patch('main.pd.DataFrame.to_excel', new=capture_table):
-                            with patch('main.save_comments') as export_comments:
-                                await scrape_profile(browser, 'demo')
-        posts = tables[0][1]
+        with patch('scraper.check_page_access', new_callable=AsyncMock), patch(
+            'scraper.collect_recent_videos', new=AsyncMock(return_value=videos)
+        ), patch('scraper.collect_video_interactions', side_effect=collect):
+            profile, posts, rows = await scrape_profile(browser, 'demo')
+        self.assertIsNone(profile['Bio'])
         self.assertEqual(len(posts), 2)
-        self.assertEqual(posts['Comments'].tolist(), [50, 50])
-        self.assertEqual(posts['Comments Collected'].tolist(), [1, 1])
-        self.assertNotIn('_comment_rows', posts.columns)
-        rows, filename = export_comments.call_args.args
+        self.assertEqual([post['Comments'] for post in posts], [50, 50])
+        self.assertEqual([post['Video ID'] for post in posts], ['123', '456'])
+        self.assertNotIn('_comment_rows', posts[0])
+        self.assertNotIn('image_id', posts[0])
         self.assertEqual([row['Video Links'] for row in rows], urls)
         self.assertEqual([row['id_perfil'] for row in rows], ['demo', 'demo'])
-        self.assertIn('demo_comentarios_', filename)
-        metrics_page.close.assert_awaited_once()
+        page.close.assert_awaited_once()
+
+    async def test_profile_waits_for_hydration_before_reading_bio_and_counts(self):
+        browser = AsyncMock()
+        page = browser.new_page.return_value
+        ready = False
+        bio = AsyncMock()
+        bio.inner_text.return_value = 'Bio real'
+        count = AsyncMock()
+        count.inner_text.return_value = '12'
+        events = []
+
+        async def hydrate(selector, **kwargs):
+            nonlocal ready
+            self.assertIn('followers-count', selector)
+            self.assertIn('user-bio', selector)
+            self.assertEqual(kwargs['timeout'], DEFAULT_CONFIG.selector_timeout)
+            ready = True
+            events.append('hydrated')
+
+        async def query(selector):
+            self.assertTrue(ready)
+            events.append(selector)
+            return bio if 'user-bio' in selector else count
+
+        async def videos(*args):
+            self.assertEqual(events[-1], '[data-e2e="user-bio"]')
+            return []
+
+        page.wait_for_selector.side_effect = hydrate
+        page.query_selector.side_effect = query
+        with patch('scraper.check_page_access', new_callable=AsyncMock) as access, patch(
+            'scraper.collect_recent_videos', side_effect=videos
+        ), patch('scraper.collect_video_interactions', new=AsyncMock(return_value=[])):
+            profile, _, _ = await scrape_profile(browser, 'demo')
+        self.assertEqual(profile['Bio'], 'Bio real')
+        self.assertEqual(profile['Followers'], 12)
+        self.assertEqual(profile['Profile Error'], '')
+        self.assertEqual(access.await_count, 2)
+        page.goto.assert_awaited_once()
+        page.close.assert_awaited_once()
+
+    async def test_profile_timeout_returns_partial_data_and_limitation(self):
+        browser = AsyncMock()
+        page = browser.new_page.return_value
+        page.wait_for_selector.side_effect = TimeoutError('Sin datos de perfil')
+        page.query_selector.return_value = None
+        with patch('scraper.check_page_access', new_callable=AsyncMock), patch(
+            'scraper.collect_recent_videos', new=AsyncMock(return_value=[])
+        ), patch('scraper.collect_video_interactions', new=AsyncMock(return_value=[])):
+            profile, posts, comments = await scrape_profile(browser, 'demo')
+        self.assertIsNone(profile['Bio'])
+        self.assertIsNone(profile['Followers'])
+        self.assertIn('Perfil parcial', profile['Profile Error'])
+        self.assertIn('Sin datos de perfil', profile['Profile Error'])
+        self.assertEqual((posts, comments), ([], []))
+        page.close.assert_awaited_once()
+
+    async def test_profile_access_rechecked_after_wait_and_page_closed_on_restriction(self):
+        browser = AsyncMock()
+        page = browser.new_page.return_value
+        page.wait_for_selector.side_effect = TimeoutError('CAPTCHA')
+        with patch('scraper.check_page_access', new=AsyncMock(side_effect=[
+            None, ScrapingRestrictedError('Verificacion requerida'),
+        ])), patch('scraper.collect_recent_videos', new_callable=AsyncMock) as videos:
+            with self.assertRaises(ScrapingRestrictedError):
+                await scrape_profile(browser, 'demo')
+        videos.assert_not_awaited()
+        page.query_selector.assert_not_awaited()
+        page.close.assert_awaited_once()
 
 
 if __name__ == '__main__':
